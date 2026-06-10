@@ -42,7 +42,7 @@ while true; do
 
     # 运行 Agent
     echo "🚀 启动 Agent..."
-    if python3 "$AGENT_SCRIPT" --strategy hot; then
+    if python3 "$AGENT_SCRIPT" --cheatsheet; then
         echo "✅ 本次执行成功"
     else
         echo "❌ Agent 出错，5分钟后重新拉取更新并重试..."
