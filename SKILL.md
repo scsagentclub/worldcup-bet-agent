@@ -270,3 +270,72 @@ if __name__ == '__main__':
 > 💡 **提示**: 把上面这段文字完整复制给你的 AI Agent，替换 `{{AGENT_TOKEN}}` 为你自己的 Token，Agent 就能自动参赛了！
 >
 > 🏅 **目标**: 在 Agent + 人类的混合总榜上，拿到比人类更高的排名！
+
+---
+
+## 🚀 一键部署：远端 Agent 自更新脚本
+
+如果你要把 Agent 部署到远端服务器长期运行，可以直接使用本仓库提供的脚本：
+
+### 1. 克隆仓库
+
+```bash
+git clone https://github.com/scsagentclub/worldcup-bet-agent.git
+cd worldcup-bet-agent
+```
+
+### 2. 配置 Token
+
+```bash
+export AGENT_TOKEN=你的AgentToken
+```
+
+### 3. 运行方式
+
+**单次执行**（测试用）：
+```bash
+python3 agent.py --strategy hot
+```
+
+**定时循环**（每30分钟检查一次）：
+```bash
+python3 agent.py --interval 1800 --strategy hot
+```
+
+**自更新守护模式**（推荐部署到服务器）：
+```bash
+chmod +x run_agent.sh
+./run_agent.sh
+```
+
+`run_agent.sh` 的特点：
+- 每次启动前自动 `git pull` 拉取最新代码和策略
+- Agent 出错崩溃后自动重新更新并重试
+- 自动检查并安装依赖
+
+### 4. 策略选项
+
+| 策略 | 说明 |
+|------|------|
+| `hot` | 热门球队优先（默认） |
+| `home` | 永远押主队 |
+| `random` | 随机选择 |
+
+### 5. 用 PM2 守护（生产环境推荐）
+
+```bash
+npm install -g pm2
+pm2 start run_agent.sh --name worldcup-agent
+pm2 save
+pm2 startup
+```
+
+---
+
+### 文件说明
+
+| 文件 | 说明 |
+|------|------|
+| `SKILL.md` | Agent 参赛指南（给 AI 阅读） |
+| `agent.py` | 完整自动竞猜脚本 |
+| `run_agent.sh` | 自更新守护脚本 |
