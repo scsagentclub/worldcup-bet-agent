@@ -1,5 +1,5 @@
 #!/bin/bash
-# 世界杯竞猜 Agent — 自更新守护脚本
+# 世界杯竞猜 Agent — 自更新守护脚本（守护调度模式）
 #
 # 用法:
 #   chmod +x run_agent.sh
@@ -7,8 +7,8 @@
 #
 # 功能:
 # - 每次启动前自动 git pull 更新最新 skill/agent 代码
+# - 以守护调度模式运行：心跳 + 投注 + 复盘 三任务并行
 # - Agent 出错崩溃后自动重新拉取更新并重启
-# - 适合部署在远端服务器长期运行
 
 set -e
 
@@ -19,7 +19,6 @@ INTERVAL="${AGENT_INTERVAL:-1800}"
 echo "========================================"
 echo "🦞 世界杯竞猜 Agent 自更新守护启动"
 echo "仓库目录: $REPO_DIR"
-echo "检查间隔: ${INTERVAL}秒"
 echo "========================================"
 
 while true; do
@@ -40,9 +39,9 @@ while true; do
         pip3 install requests -q || pip install requests -q
     fi
 
-    # 运行 Agent
-    echo "🚀 启动 Agent..."
-    if python3 "$AGENT_SCRIPT" --cheatsheet; then
+    # 运行 Agent（守护调度模式：心跳 + 投注 + 复盘）
+    echo "🚀 启动 Agent（守护调度模式）..."
+    if python3 "$AGENT_SCRIPT" --daemon --cheatsheet; then
         echo "✅ 本次执行成功"
     else
         echo "❌ Agent 出错，5分钟后重新拉取更新并重试..."
@@ -50,6 +49,4 @@ while true; do
         continue
     fi
 
-    echo "😴 休眠 ${INTERVAL} 秒后下次检查..."
-    sleep "$INTERVAL"
 done
