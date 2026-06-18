@@ -74,6 +74,8 @@ class AgentState:
             "last_bet": None,
             "last_retrain": None,
             "total_bets": 0,
+            "settled_bets": 0,
+            "unsettled_bets": 0,
             "correct_bets": 0,
             "total_points": 0,
             "accuracy": 0.0,
@@ -98,11 +100,13 @@ class AgentState:
         self.data["pid"] = os.getpid()
         self.save()
 
-    def update_bet_stats(self, total, correct, points):
+    def update_bet_stats(self, total, settled, unsettled, correct, points):
         self.data["total_bets"] = total
+        self.data["settled_bets"] = settled
+        self.data["unsettled_bets"] = unsettled
         self.data["correct_bets"] = correct
         self.data["total_points"] = points
-        self.data["accuracy"] = round(correct / total * 100, 2) if total > 0 else 0.0
+        self.data["accuracy"] = round(correct / settled * 100, 2) if settled > 0 else 0.0
         self.data["last_bet"] = datetime.now(timezone.utc).isoformat()
         self.save()
 
@@ -353,10 +357,12 @@ def run_bet_loop(use_cheatsheet=False, dry_run=False):
             logger.info(f"✅ 成功提交 {len(bets)} 场预测: {result.get('message')}")
 
         # 更新状态（即使 dry-run 也基于已有记录统计）
-        total = len(bets_records)
-        correct = sum(1 for b in bets_records if b.get("points", 0) > 0)
-        points = sum(b.get("points", 0) for b in bets_records)
-        state.update_bet_stats(total + len(bets), correct, points)
+        total = len(bets_records) + len(bets)
+        settled = [b for b in bets_records if b.get("status") == "finished"]
+        unsettled_count = len(bets_records) - len(settled)
+        correct = sum(1 for b in settled if b.get("points", 0) > 0)
+        points = sum(b.get("points", 0) for b in settled)
+        state.update_bet_stats(total, len(settled), unsettled_count, correct, points)
 
         return True
 
@@ -372,14 +378,19 @@ def heartbeat():
     try:
         bets = get_my_bets()
         total = len(bets)
-        correct = sum(1 for b in bets if b.get("points", 0) > 0)
-        points = sum(b.get("points", 0) for b in bets)
-        accuracy = round(correct / total * 100, 2) if total > 0 else 0.0
+        settled = [b for b in bets if b.get("status") == "finished"]
+        unsettled_count = total - len(settled)
+        correct = sum(1 for b in settled if b.get("points", 0) > 0)
+        points = sum(b.get("points", 0) for b in settled)
+        accuracy = round(correct / len(settled) * 100, 2) if len(settled) > 0 else 0.0
 
-        state.update_bet_stats(total, correct, points)
+        state.update_bet_stats(total, len(settled), unsettled_count, correct, points)
         state.update_heartbeat()
 
-        logger.info(f"💓 心跳 | 已投注 {total} 场 | 正确 {correct} 场 | 胜率 {accuracy}% | 积分 {points}")
+        logger.info(
+            f"💓 心跳 | 已投注 {total} 场（已结算 {len(settled)} / 未结算 {unsettled_count}）"
+            f" | 已结算中正确 {correct} 场 | 胜率 {accuracy}% | 积分 {points}"
+        )
 
         if HEARTBEAT_URL:
             try:
@@ -387,6 +398,8 @@ def heartbeat():
                     "token_prefix": state.data["agent_token_prefix"],
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                     "total_bets": total,
+                    "settled_bets": len(settled),
+                    "unsettled_bets": unsettled_count,
                     "correct_bets": correct,
                     "accuracy": accuracy,
                     "total_points": points,
