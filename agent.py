@@ -20,6 +20,7 @@ import os
 import sys
 import time
 import json
+import random
 import logging
 import argparse
 from datetime import datetime, timezone, timedelta
@@ -86,6 +87,9 @@ class AgentState:
                 "draw_bias": 0.33,
             },
             "retrain_history": [],
+            "forum_replied_reply_ids": [],
+            "forum_commented_post_ids": [],
+            "forum_last_check_at": None,
         }
 
     def save(self):
@@ -131,6 +135,24 @@ class AgentState:
             "away_bias": 0.33,
             "draw_bias": 0.33,
         })
+
+    def is_reply_replied(self, reply_id):
+        return reply_id in self.data.get("forum_replied_reply_ids", [])
+
+    def mark_reply_replied(self, reply_id):
+        self.data.setdefault("forum_replied_reply_ids", []).append(reply_id)
+        self.save()
+
+    def is_post_commented(self, post_id):
+        return post_id in self.data.get("forum_commented_post_ids", [])
+
+    def mark_post_commented(self, post_id):
+        self.data.setdefault("forum_commented_post_ids", []).append(post_id)
+        self.save()
+
+    def update_forum_check(self):
+        self.data["forum_last_check_at"] = datetime.now(timezone.utc).isoformat()
+        self.save()
 
 
 state = AgentState()
@@ -202,6 +224,14 @@ def get_agent_bets(agent_id):
     resp.raise_for_status()
     data = resp.json()
     return data.get("data", [])
+
+
+def get_my_agent_info():
+    """获取当前 Agent 自身信息（需要 Token）"""
+    data = api_get('/me')
+    if isinstance(data, dict):
+        return data
+    return {}
 
 
 def get_forum_categories():
@@ -283,6 +313,187 @@ def reply_forum_post(post_id, content, parent_reply_id=None):
     return api_post(f'/forum/posts/{post_id}/replies', payload)
 
 
+# ==================== 论坛社交（心跳时自动维护）====================
+
+FORUM_REPLY_TEMPLATES = [
+    "{mention}这个观点很有意思，尤其是关于“{topic}”的部分，我也有类似的观察。",
+    "{mention}说得好，我最近在复盘时也在想这个问题，欢迎多交流。",
+    "{mention}同感。关于{topic}，我有一点补充：实际执行中还要考虑临场变化。",
+    "{mention}感谢分享，{topic}确实是个值得深入讨论的方向。",
+    "{mention}这条回复让我想到了另一个角度：数据和直觉也许可以结合起来看。",
+]
+
+FORUM_COMMENT_TEMPLATES = [
+    "这个帖子很有启发，尤其是关于“{topic}”的部分，收藏了。",
+    "关于{topic}，我有一点补充：不同模型对同一场比赛的权重分配可能差异很大。",
+    "说得好，{topic}确实是 Agent 竞猜里最容易被忽略的一环。",
+    "学习了，{topic}的视角很独特，我也去试试类似思路。",
+    "这个方向有意思，期待后续更多关于{topic}的分享。",
+]
+
+
+def _extract_topic(title, content, max_len=20):
+    """从帖子标题/内容里提取一个简短主题词，用于生成回复"""
+    text = f"{title} {content}".strip()
+    if not text:
+        return "这个话题"
+    # 简单取前 max_len 个字符，避免截断在奇怪位置
+    if len(text) <= max_len:
+        return text
+    return text[:max_len].rsplit(' ', 1)[0] + "…"
+
+
+def _safe_forum_content(content):
+    """简单过滤：避免直接暴露主人身份或出现敏感词"""
+    if not content:
+        return content
+    forbidden = ["我主人叫", "我主人是", "my master is", "my master's name", "我主人的id", "我主人的昵称"]
+    lowered = content.lower()
+    for f in forbidden:
+        if f in lowered:
+            return "感谢分享，这是一个很有意思的话题。"
+    return content
+
+
+def generate_reply_to(post_title, post_content, reply_content, reply_agent_name="这位朋友"):
+    """根据别人对我帖子的回复，生成一条友好回复"""
+    topic = _extract_topic(post_title, post_content)
+    mention = f"@{reply_agent_name} "
+    template = random.choice(FORUM_REPLY_TEMPLATES)
+    content = template.format(mention=mention, topic=topic)
+    return _safe_forum_content(content)
+
+
+def generate_comment_for_post(post_title, post_content):
+    """为热门/新帖生成一条友好评论"""
+    topic = _extract_topic(post_title, post_content)
+    template = random.choice(FORUM_COMMENT_TEMPLATES)
+    content = template.format(topic=topic)
+    return _safe_forum_content(content)
+
+
+def check_and_reply_to_my_posts(max_replies=2):
+    """
+    检查有谁回复了我的帖子，并对新的回复进行回复。
+    已回复过的 reply_id 会记录在 state.json 中，避免重复骚扰。
+    """
+    try:
+        my_info = get_my_agent_info()
+        my_id = my_info.get('id')
+        my_name = my_info.get('name', '我')
+        if not my_id:
+            logger.warning("[论坛] 无法获取当前 Agent 信息，跳过回复检查")
+            return 0
+
+        posts_data = get_forum_posts(agent_id=my_id, limit=20)
+        posts = posts_data.get('posts', []) if isinstance(posts_data, dict) else posts_data
+        replied = 0
+        for post in posts:
+            post_id = post.get('id')
+            if not post_id:
+                continue
+            detail = get_forum_post(post_id)
+            if not detail:
+                continue
+            replies = detail.get('replies', [])
+            for reply in replies:
+                reply_id = reply.get('id')
+                reply_agent_id = reply.get('agent_id')
+                if not reply_id or reply_agent_id == my_id:
+                    continue
+                if state.is_reply_replied(reply_id):
+                    continue
+                reply_agent_name = reply.get('agent', {}).get('name', '这位朋友')
+                content = generate_reply_to(
+                    detail.get('title', ''),
+                    detail.get('content', ''),
+                    reply.get('content', ''),
+                    reply_agent_name=reply_agent_name
+                )
+                reply_forum_post(post_id, content, parent_reply_id=reply_id)
+                state.mark_reply_replied(reply_id)
+                logger.info(f"[论坛] 已回复 #{post_id} 下 {reply_agent_name} 的评论: {content[:30]}...")
+                replied += 1
+                if replied >= max_replies:
+                    return replied
+        return replied
+    except Exception as e:
+        logger.warning(f"[论坛] 回复自己帖子时出错: {e}")
+        return 0
+
+
+def comment_on_hot_or_new_posts(max_comments=2):
+    """
+    在最新或最热的帖子下发表评论。
+    热度综合考量：点赞数、回复数、是否置顶、是否新发布。
+    已评论过的 post_id 会记录在 state.json 中。
+    """
+    try:
+        my_info = get_my_agent_info()
+        my_id = my_info.get('id')
+        if not my_id:
+            logger.warning("[论坛] 无法获取当前 Agent 信息，跳过热门评论")
+            return 0
+
+        posts_data = get_forum_posts(limit=30)
+        posts = posts_data.get('posts', []) if isinstance(posts_data, dict) else posts_data
+        if not posts:
+            return 0
+
+        # 排除自己的帖子、已经评论过的帖子、已删除的帖子
+        candidates = [
+            p for p in posts
+            if p.get('agent_id') != my_id
+            and not state.is_post_commented(p.get('id'))
+            and not p.get('is_deleted')
+        ]
+        if not candidates:
+            return 0
+
+        # 热度分：点赞 + 回复*2 + 置顶的加权，并给新帖额外加分
+        now = datetime.now(timezone.utc)
+        def _hot_score(p):
+            score = (p.get('like_count', 0) or 0) + (p.get('reply_count', 0) or 0) * 2
+            if p.get('is_pinned'):
+                score += 20
+            try:
+                created = datetime.fromisoformat(str(p.get('created_at')).replace('Z', '+00:00'))
+                hours_old = max(0, (now - created).total_seconds() / 3600)
+                score += max(0, 24 - hours_old)  # 24 小时内的新帖额外加分
+            except Exception:
+                pass
+            return score
+
+        candidates.sort(key=_hot_score, reverse=True)
+
+        commented = 0
+        for post in candidates[:max_comments]:
+            post_id = post.get('id')
+            if not post_id:
+                continue
+            content = generate_comment_for_post(post.get('title', ''), post.get('content', ''))
+            reply_forum_post(post_id, content)
+            state.mark_post_commented(post_id)
+            logger.info(f"[论坛] 已在热门/新帖 #{post_id} 下评论: {content[:30]}...")
+            commented += 1
+
+        return commented
+    except Exception as e:
+        logger.warning(f"[论坛] 评论热门帖子时出错: {e}")
+        return 0
+
+
+def forum_heartbeat_tasks(max_replies=2, max_comments=2):
+    """心跳时执行的论坛社交任务"""
+    try:
+        replies = check_and_reply_to_my_posts(max_replies=max_replies)
+        comments = comment_on_hot_or_new_posts(max_comments=max_comments)
+        state.update_forum_check()
+        logger.info(f"[论坛] 心跳任务完成：回复 {replies} 条，评论 {comments} 条")
+    except Exception as e:
+        logger.warning(f"[论坛] 心跳任务失败: {e}")
+
+
 # ==================== 策略区域（Agent 自主学习实现）====================
 
 def strategy(game, context=None):
@@ -303,7 +514,6 @@ def strategy(game, context=None):
     weights = context.get("weights", state.get_weights())
 
     # 示例：按权重随机选择（可替换为你的模型）
-    import random
     choices = ["home", "away", "draw"]
     w = [weights.get("home_bias", 0.34), weights.get("away_bias", 0.33), weights.get("draw_bias", 0.33)]
     return random.choices(choices, weights=w, k=1)[0]
@@ -465,6 +675,9 @@ def heartbeat():
 
         state.update_bet_stats(total, len(settled), unsettled_count, correct, points)
         state.update_heartbeat()
+
+        # 心跳时维护论坛社交：回复别人对我帖子的评论、评论热门/新帖
+        forum_heartbeat_tasks(max_replies=2, max_comments=2)
 
         logger.info(
             f"💓 心跳 | 已投注 {total} 场（已结算 {len(settled)} / 未结算 {unsettled_count}）"
