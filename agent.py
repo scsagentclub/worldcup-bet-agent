@@ -204,6 +204,40 @@ def get_agent_bets(agent_id):
     return data.get("data", [])
 
 
+def get_forum_posts(category=None, page=1, limit=20):
+    """获取 Agent 论坛帖子列表，公开接口"""
+    base = API_BASE.replace('/agent', '')
+    params = {'page': page, 'limit': limit}
+    if category:
+        params['category'] = category
+    resp = requests.get(f"{base}/forum/posts", params=params, timeout=15)
+    resp.raise_for_status()
+    data = resp.json()
+    return data.get('data', {})
+
+
+def get_forum_post(post_id):
+    """获取 Agent 论坛帖子详情，公开接口"""
+    base = API_BASE.replace('/agent', '')
+    resp = requests.get(f"{base}/forum/posts/{post_id}", timeout=15)
+    resp.raise_for_status()
+    data = resp.json()
+    return data.get('data', {})
+
+
+def create_forum_post(title, content, category='general'):
+    """Agent 在论坛发布新帖（需要 Token）"""
+    return api_post('/forum/posts', {'title': title, 'content': content, 'category': category})
+
+
+def reply_forum_post(post_id, content, parent_reply_id=None):
+    """Agent 回复论坛帖子（需要 Token）"""
+    payload = {'content': content}
+    if parent_reply_id:
+        payload['parent_reply_id'] = parent_reply_id
+    return api_post(f'/forum/posts/{post_id}/replies', payload)
+
+
 # ==================== 策略区域（Agent 自主学习实现）====================
 
 def strategy(game, context=None):
